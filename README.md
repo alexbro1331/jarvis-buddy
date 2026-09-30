@@ -100,6 +100,16 @@ variable also works for Claude). Don't share that file.
 `stt_engine` (`auto`/`groq`/`local`/`google`), `stt_language` (`""` = auto, or `hi` / `en`), `gemini_model`, `groq_model`,
 `ollama_model`, `claude_model` (default `claude-opus-5-5`; `claude-sonnet-5-5` is cheaper).
 
+## Quick commands
+
+```
+python -m buddy --set-key groq YOUR_GROQ_KEY       # save a free key (also: gemini, claude)
+python -m buddy --set-key gemini YOUR_GEMINI_KEY
+python -m buddy --voices                            # hear the same sentence in several natural voices
+python -m buddy --set-voice en-US-AvaMultilingualNeural   # keep the one you like ('auto' resets)
+python -m buddy --diagnose                          # checks everything on your PC
+```
+
 ## Something not working? Run the diagnosis
 
 ```

@@ -81,7 +81,7 @@ class BuddyApp:
         self.bubble = Bubble()  # the assistant's reply
         self.user_bubble = Bubble(user=True)  # what you said, stays visible while it answers
         self.listener = Listener(cfg["language"], cfg)
-        self.speaker = Speaker(cfg["speak_replies"], cfg["voice_gender"])
+        self.speaker = Speaker(cfg["speak_replies"], cfg["voice_gender"], cfg["voice_name"])
         self.thinker = _Thinker(cfg)
         self.user_hidden = False
         self.auto_hidden = False
@@ -372,6 +372,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--install-autostart", action="store_true", help="start automatically at login")
     ap.add_argument("--uninstall-autostart", action="store_true")
     ap.add_argument("--make-avatar", metavar="PHOTO", help="build the cartoon character from your photo (runs locally)")
+    ap.add_argument("--set-key", nargs=2, metavar=("SERVICE", "KEY"), help="save an API key: gemini | groq | claude")
+    ap.add_argument("--voices", action="store_true", help="play a sample in several natural voices so you can pick one")
+    ap.add_argument("--set-voice", metavar="NAME", help="use this exact voice (from --voices); 'auto' resets")
     ap.add_argument("--diagnose", action="store_true", help="check voice, mic, keys and photo tool on this PC")
     ap.add_argument("--say", metavar="TEXT", help="run a typed command without the GUI (for testing)")
     args = ap.parse_args(argv)
@@ -382,6 +385,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.uninstall_autostart:
         print(autostart.uninstall())
+        return 0
+    if args.set_key:
+        service, key = args.set_key[0].lower(), args.set_key[1].strip()
+        field = {"gemini": "gemini_api_key", "groq": "groq_api_key", "claude": "anthropic_api_key"}.get(service)
+        if not field:
+            print("SERVICE must be gemini, groq or claude")
+            return 1
+        cfg[field] = key
+        cfg.save()
+        print(f"Saved {service} key ({len(key)} characters) in {cfg.path}")
+        return 0
+    if args.voices:
+        from . import diagnose
+
+        return diagnose.voices(cfg)
+    if args.set_voice:
+        cfg["voice_name"] = "" if args.set_voice.lower() == "auto" else args.set_voice
+        cfg.save()
+        print(f"Voice set to {cfg['voice_name'] or 'automatic'}. Restart Buddy.")
         return 0
     if args.make_avatar:
         try:

@@ -13,6 +13,7 @@ DEFAULTS = {
     "language": "en-IN",  # speech recognition language; try "hi-IN" for Hindi
     "speak_replies": True,
     "voice_gender": "male",  # male / female (neural voices)
+    "voice_name": "",  # exact voice, e.g. en-US-AndrewMultilingualNeural (pick with: python -m buddy --voices)
     # --- AI keys: set from the menu, stored in this file on your PC ---
     "gemini_api_key": "",  # free: https://aistudio.google.com/apikey
     "groq_api_key": "",  # free: https://console.groq.com/keys  (also gives free Whisper speech-to-text)

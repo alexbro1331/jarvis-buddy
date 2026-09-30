@@ -55,7 +55,7 @@ def test_choose_face_without_a_face_shows_a_clear_message(buddy, tmp_path, monke
 def test_voice_failure_is_explained_not_silent(qapp, monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    def boom(text, gender="male"):
+    def boom(text, gender="male", voice=""):
         raise voice.TtsError("edge-tts: ClientConnectorError: blocked | gTTS: gTTSError: offline")
 
     monkeypatch.setattr(voice, "synthesize", boom)

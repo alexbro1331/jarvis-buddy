@@ -163,18 +163,28 @@ class Listener(QObject):
         return np.concatenate(chunks).tobytes() if chunks else None
 
 
+# Voices worth auditioning: Hindi and Indian-English neural voices plus Microsoft's "multilingual" voices,
+# which are the most human-sounding and can switch between Hindi and English mid-sentence.
+CANDIDATE_VOICES = [
+    "hi-IN-MadhurNeural", "hi-IN-SwaraNeural",
+    "en-IN-PrabhatNeural", "en-IN-NeerjaNeural", "en-IN-NeerjaExpressiveNeural",
+    "en-US-AndrewMultilingualNeural", "en-US-BrianMultilingualNeural",
+    "en-US-AvaMultilingualNeural", "en-US-EmmaMultilingualNeural",
+]
+
+
 class TtsError(Exception):
     """No online voice could produce audio; the message lists why each one failed."""
 
 
-def synthesize(text: str, gender: str = "male") -> Path:
+def synthesize(text: str, gender: str = "male", voice: str = "") -> Path:
     """Text -> mp3 file. Microsoft neural voice first (most natural), Google's voice as backup."""
     out = Path(tempfile.mkdtemp(prefix="buddy-tts-")) / "say.mp3"
     reasons = []
     try:
         import edge_tts
 
-        asyncio.run(edge_tts.Communicate(text, pick_voice(text, gender), rate="+4%").save(str(out)))
+        asyncio.run(edge_tts.Communicate(text, voice or pick_voice(text, gender), rate="+4%").save(str(out)))
         if out.exists() and out.stat().st_size > 500:
             return out
         reasons.append("edge-tts: empty audio")
@@ -219,10 +229,11 @@ class Speaker(QObject):
     degraded = pyqtSignal(str)
     _ready = pyqtSignal(str, str)  # (mp3 path, spoken text), delivered on the UI thread
 
-    def __init__(self, enabled: bool = True, gender: str = "male"):
+    def __init__(self, enabled: bool = True, gender: str = "male", voice: str = ""):
         super().__init__()
         self.enabled = enabled
         self.gender = gender
+        self.voice = voice  # exact edge-tts voice name chosen with --voices / --set-voice ("" = automatic)
         self._player = None
         self._audio = None
         self._text = ""
@@ -250,7 +261,7 @@ class Speaker(QObject):
     # -- online neural voice ---------------------------------------------------
     def _synth(self, text: str) -> None:
         try:
-            path = synthesize(text, self.gender)
+            path = synthesize(text, self.gender, self.voice)
         except TtsError as e:
             self._warn(str(e))
             self._fallback(text)
