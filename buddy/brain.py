@@ -1,8 +1,8 @@
-"""The assistant's brain: Claude with a small, safe set of tools and a short memory.
+"""The assistant's brain: an LLM with a small, safe set of tools and a short memory.
 
-Needs an API key (menu -> "Set Claude API key", or the ANTHROPIC_API_KEY env var).
-Claude can only act through the tools below -- it never gets a shell, and it cannot
-delete or overwrite anything.
+Providers are tried in order (free ones first): Gemini, Groq, Ollama (local), Claude. If one is
+rate-limited or unreachable the next takes over. Whatever the provider, the model can only act
+through the tools below -- it never gets a shell, and it cannot delete or overwrite anything.
 """
 
 from __future__ import annotations
@@ -10,28 +10,29 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import urllib.parse
 import webbrowser
 from pathlib import Path
 from typing import Callable
 
-from . import commands
+from . import commands, providers
 from .config import config_dir
 
-MAX_TURNS = 10  # past user/assistant exchanges kept as conversation memory
+MAX_TURNS = 6  # past user/assistant exchanges kept as conversation memory
 MAX_TOOL_ROUNDS = 6
 
-SYSTEM = """You are {name}, a funny, warm personal voice assistant that lives on {user}'s laptop screen as a cartoon character with {user}'s face. Think Jarvis, but with a great sense of humour.
+SYSTEM = """You are {name}, a funny, warm personal voice assistant living on {user}'s laptop screen as a cartoon character with {user}'s face. Think Jarvis with a great sense of humour.
 
-How to behave:
-- Your replies are spoken aloud by a text-to-speech voice, so write plain spoken sentences: no markdown, no bullet lists, no emojis, no URLs read out. Keep it to one to three short sentences unless {user} asks for detail.
-- Match {user}'s language: English, Hinglish (Hindi in Roman letters) or Hindi. If {user} wrote in Devanagari, answer in Devanagari; if in Hinglish or English, answer in Roman letters. Light, friendly jokes and a little teasing are welcome, never at {user}'s expense when they are stressed or asking something serious.
-- You can take actions on the computer with your tools. When {user} asks for something a tool can do (open a site or app, search, play something, create a folder, timers, volume, screenshots, remembering things), call the tool right away instead of asking for permission, then confirm briefly what you did.
-- For questions, just answer from your own knowledge. If you are unsure or the answer needs live information (news, scores, prices, weather), say so and offer to search the web, or do the search if they asked.
-- Speech recognition is imperfect: if the request is garbled, make your best guess from context (names of apps, sites and songs are often misheard) and act; only ask a clarifying question when a wrong guess would be costly.
-- You cannot delete files, run arbitrary commands, send messages or spend money. If asked, say so in a friendly way.
+Your replies are SPOKEN by a text-to-speech voice, so:
+- Speak like a real friend: short, natural, conversational, one to three sentences. No markdown, lists, emojis, symbols or URLs.
+- Language: mirror {user}. If they speak Hindi or Hinglish, reply in natural Hinglish written with Hindi words in Devanagari and English words in Latin letters, e.g. "मैंने YouTube खोल दिया, enjoy करो!". This is important: Roman-letter Hindi sounds robotic when spoken. If they speak plain English, reply in English.
+- Light jokes and friendly teasing are welcome, but be serious when {user} is stressed or asks something serious.
 
-Things you remember about {user}:
+Actions: you can control the computer with your tools (open sites/apps, search, play on YouTube, create folders, list files, timers, volume/screenshot/lock, remember facts). When asked for something a tool can do, call it immediately, then confirm briefly. For questions, answer from your own knowledge; if it needs live information (news, scores, prices, weather) say so and offer a web search, or run it if asked.
+Speech recognition is imperfect: guess garbled app, site and song names from context and act; only ask when a wrong guess would be costly. You cannot delete files, run arbitrary commands, send messages or spend money.
+
+What you remember about {user}:
 {notes}
 """
 
@@ -154,8 +155,10 @@ class Toolbox:
 
     def __init__(self, cfg, notes: Notes, on_timer: Callable[[float, str], None] | None = None):
         self.cfg, self.notes, self.on_timer = cfg, notes, on_timer
+        self.calls = 0  # tools executed so far (used to avoid repeating actions on provider fallback)
 
     def run(self, name: str, args: dict) -> str:
+        self.calls += 1
         try:
             fn = getattr(self, f"_t_{name}", None)
             return fn(**args) if fn else f"Unknown tool {name}"
@@ -216,12 +219,15 @@ class Toolbox:
         return "Saved."
 
 
-def api_key(cfg) -> str | None:
+ORDER = ["gemini", "groq", "ollama", "claude"]  # free first, paid last
+
+
+def claude_key(cfg) -> str | None:
     return (cfg.data.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY") or "").strip() or None
 
 
-def available(cfg) -> bool:
-    if not api_key(cfg):
+def claude_ready(cfg) -> bool:
+    if not claude_key(cfg):
         return False
     try:
         import anthropic  # noqa: F401
@@ -230,72 +236,130 @@ def available(cfg) -> bool:
     return True
 
 
+def usable_providers(cfg) -> list[str]:
+    """Providers that are set up, in the order they will be tried."""
+    order = [p for p in cfg.data.get("brain_order", ORDER) if p in ORDER]
+    return [p for p in order if (claude_ready(cfg) if p == "claude" else providers.configured(cfg, p))]
+
+
+def available(cfg) -> bool:
+    return bool(usable_providers(cfg))
+
+
+_THINK = re.compile(r"<think>.*?</think>", re.S)
+
+
 class Brain:
     def __init__(self, cfg, on_timer: Callable[[float, str], None] | None = None, client=None):
         self.cfg = cfg
         self.notes = Notes()
         self.tools = Toolbox(cfg, self.notes, on_timer)
         self.history: list[dict] = []
-        self._client = client
-
-    def _get_client(self):
-        if self._client is None:
-            import anthropic
-
-            self._client = anthropic.Anthropic(api_key=api_key(self.cfg))
-        return self._client
+        self._client = client  # Claude client (injectable for tests)
+        self.last_provider: str | None = None
 
     def reset_client(self) -> None:
         self._client = None
 
     def ask(self, text: str) -> str:
         """Answer `text`, running tools as needed. Returns the spoken reply. Blocking."""
-        import anthropic
-
         now = dt.datetime.now().strftime("%A, %d %B %Y, %I:%M %p")
         system = SYSTEM.format(name=self.cfg["name"], user=self.cfg["user_name"], notes=self.notes.text())
-        messages = list(self.history) + [{"role": "user", "content": f"[{now}] {text}"}]
+        stamped = f"[{now}] {text}"
 
-        try:
-            reply = self._loop(system, messages)
-        except anthropic.AuthenticationError:
-            return "Claude API key galat lag rahi hai. Menu se dobara key daal do."
-        except anthropic.RateLimitError:
-            return "Abhi Claude thoda busy hai, ek minute baad try karo."
-        except anthropic.APIConnectionError:
-            return "Internet ya Claude tak nahi pahunch pa raha."
-        except anthropic.APIStatusError as e:
-            return f"Claude se dikkat aayi: {getattr(e, 'message', e)}"
+        problems: list[str] = []
+        for name in usable_providers(self.cfg):
+            ran_before = self.tools.calls
+            try:
+                if name == "claude":
+                    reply = self._claude_loop(system, stamped)
+                else:
+                    reply = self._openai_loop(name, system, stamped)
+            except providers.AuthFailed:
+                problems.append(f"{name}: key galat")
+                continue
+            except (providers.RateLimited, providers.Unavailable) as e:
+                problems.append(str(e))
+                if self.tools.calls != ran_before:
+                    break  # an action already ran; don't risk repeating it on another provider
+                continue
+            self.last_provider = name
+            self.history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+            self.history = self.history[-2 * MAX_TURNS:]
+            return reply
 
-        self.history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
-        self.history = self.history[-2 * MAX_TURNS:]
-        return reply
+        if any("rate limit" in p for p in problems):
+            return "आज की free limit थोड़ी भर गई है, कुछ देर बाद try करो या menu से दूसरी API key जोड़ दो।"
+        if any("key galat" in p for p in problems):
+            return "API key सही नहीं लग रही। Menu से दोबारा key डाल दो।"
+        return "इंटरनेट या AI service तक नहीं पहुँच पा रहा, थोड़ी देर बाद try करो।"
 
-    def _loop(self, system: str, messages: list) -> str:
-        client = self._get_client()
+    # -- OpenAI-compatible providers (Gemini, Groq, Ollama) ---------------------------------
+    def _openai_loop(self, name: str, system: str, user_text: str) -> str:
+        msgs = [{"role": "system", "content": system}] + list(self.history) + [{"role": "user", "content": user_text}]
+        tools = providers.to_openai_tools(TOOLS)
         for _ in range(MAX_TOOL_ROUNDS):
-            resp = client.beta.messages.create(
-                model=self.cfg["claude_model"],
-                max_tokens=1024,
-                system=system,
-                tools=TOOLS,
-                messages=messages,
-                output_config={"effort": "low"},  # fast replies; this is a voice assistant
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",  # re-run on another model if a safety classifier false-positives
-            )
-            if resp.stop_reason == "refusal":
-                return "Is wale sawaal mein main madad nahi kar sakta."
-            tool_calls = [b for b in resp.content if b.type == "tool_use"]
-            if resp.stop_reason != "tool_use" or not tool_calls:
-                text = "".join(b.text for b in resp.content if b.type == "text").strip()
-                return text or "Ho gaya!"
-            messages.append({"role": "assistant", "content": resp.content})
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": b.id, "content": self.tools.run(b.name, b.input)}
-                    for b in tool_calls
-                ],
-            })
-        return "Kaam thoda lamba ho gaya, dobara bolo?"
+            m = providers.chat(self.cfg, name, msgs, tools)
+            calls = m.get("tool_calls") or []
+            if not calls:
+                reply = _THINK.sub("", m.get("content") or "").strip()
+                return reply or "हो गया!"
+            msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
+            for i, c in enumerate(calls):
+                try:
+                    args = json.loads(c["function"].get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                msgs.append({
+                    "role": "tool",
+                    "tool_call_id": c.get("id") or f"call_{i}",
+                    "content": self.tools.run(c["function"]["name"], args),
+                })
+        return "काम थोड़ा लंबा हो गया, दोबारा बोलो?"
+
+    # -- Claude -----------------------------------------------------------------------------
+    def _claude_client(self):
+        if self._client is None:
+            import anthropic
+
+            self._client = anthropic.Anthropic(api_key=claude_key(self.cfg))
+        return self._client
+
+    def _claude_loop(self, system: str, user_text: str) -> str:
+        import anthropic
+
+        messages = list(self.history) + [{"role": "user", "content": user_text}]
+        try:
+            client = self._claude_client()
+            for _ in range(MAX_TOOL_ROUNDS):
+                resp = client.beta.messages.create(
+                    model=self.cfg["claude_model"],
+                    max_tokens=1024,
+                    system=system,
+                    tools=TOOLS,
+                    messages=messages,
+                    output_config={"effort": "low"},  # fast replies; this is a voice assistant
+                    betas=["server-side-fallback-2026-07-01"],
+                    fallbacks="default",  # re-run on another model if a safety classifier false-positives
+                )
+                if resp.stop_reason == "refusal":
+                    return "इस वाले सवाल में मैं मदद नहीं कर सकता।"
+                tool_calls = [b for b in resp.content if b.type == "tool_use"]
+                if resp.stop_reason != "tool_use" or not tool_calls:
+                    text = "".join(b.text for b in resp.content if b.type == "text").strip()
+                    return text or "हो गया!"
+                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": b.id, "content": self.tools.run(b.name, b.input)}
+                        for b in tool_calls
+                    ],
+                })
+        except anthropic.AuthenticationError as e:
+            raise providers.AuthFailed("claude") from e
+        except anthropic.RateLimitError as e:
+            raise providers.RateLimited("claude: rate limit") from e
+        except (anthropic.APIConnectionError, anthropic.APIStatusError) as e:
+            raise providers.Unavailable(f"claude: {e}") from e
+        return "काम थोड़ा लंबा हो गया, दोबारा बोलो?"

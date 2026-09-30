@@ -78,12 +78,12 @@ APPS = {
 }
 
 JOKES = [
-    "Computer ne doctor ko kya bola? Mujhe virus ho gaya hai! Doctor: Main Windows nahi, insaan ka doctor hoon!",
-    "Why do programmers prefer dark mode? Because light attracts bugs!",
-    "Mera WiFi aur meri lovelife same hain... dono mein signal nahi aata.",
-    "I told my computer I needed a break. Now it won't stop sending me Kit-Kat ads.",
-    "Why was the laptop cold? It left its Windows open!",
-    "Chandan, aaj bhi code chal gaya? Kisi ko batana mat, mujhe bhi samajh nahi aaya kaise!",
+    "Computer ने doctor को क्या बोला? मुझे virus हो गया है! Doctor बोला, मैं Windows का नहीं, इंसानों का doctor हूँ!",
+    "Programmers dark mode क्यों पसंद करते हैं? क्योंकि light से bugs आते हैं!",
+    "मेरा WiFi और मेरी lovelife एक जैसे हैं। दोनों में signal नहीं आता।",
+    "मैंने अपने computer को बोला कि मुझे break चाहिए। अब वो मुझे सिर्फ़ Kit Kat के ads दिखा रहा है।",
+    "Laptop को ठंड क्यों लग रही थी? क्योंकि उसकी Windows खुली रह गई थी!",
+    "Chandan, आज code पहली बार में चल गया? किसी को बताना मत, मुझे भी नहीं पता कैसे चला!",
 ]
 
 
@@ -145,7 +145,7 @@ def parse(raw: str) -> Action:
             for loc in ("desktop", "documents", "downloads"):
                 name = re.sub(rf"\b(?:in|on|inside)?\s*{loc}\b", "", name, flags=re.I).strip()
         return Action("create_folder", {"name": name, "location": location}) if name else Action(
-            "say", {"text": "Folder ka naam batao, kaunsa naam rakhun?"}
+            "say", {"text": "Folder का नाम बताओ, कौन सा नाम रखूँ?"}
         )
 
     # --- time / date ---
@@ -240,11 +240,11 @@ def execute(action: Action, cfg=None) -> str:
 
     if k == "open_url":
         webbrowser.open(a["url"])
-        return f"{a.get('label', 'Website')} khol diya!"
+        return f"{a.get('label', 'Website')} खोल दिया!"
 
     if k == "search":
         webbrowser.open("https://www.google.com/search?q=" + urllib.parse.quote_plus(a["query"]))
-        return f"{a['query']} search kar raha hoon."
+        return f"{a['query']} search कर रहा हूँ।"
 
     if k == "open_app":
         return _open_app(a)
@@ -256,14 +256,14 @@ def execute(action: Action, cfg=None) -> str:
         try:
             path.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            return f"Folder nahi bana paya: {e.strerror or e}"
-        return f"{a['name']} naam ka folder {base.name} mein bana diya."
+            return f"फ़ोल्डर नहीं बन पाया: {e.strerror or e}"
+        return f"{a['name']} नाम का folder {base.name} में बना दिया।"
 
     if k == "time":
-        return "Abhi " + dt.datetime.now().strftime("%I:%M %p") + " baj rahe hain."
+        return "अभी " + dt.datetime.now().strftime("%I:%M %p") + " बज रहे हैं।"
 
     if k == "date":
-        return "Aaj " + dt.datetime.now().strftime("%A, %d %B %Y") + " hai."
+        return "आज " + dt.datetime.now().strftime("%A, %d %B %Y") + " है।"
 
     if k == "volume":
         return _volume(a["dir"])
@@ -275,9 +275,9 @@ def execute(action: Action, cfg=None) -> str:
         return _lock()
 
     if k == "quit":
-        return "Bye bye Chandan!"
+        return "बाय बाय! फिर मिलते हैं।"
 
-    return "Mujhe samajh nahi aaya, dobara bolo?"
+    return "मुझे समझ नहीं आया, दोबारा बोलो?"
 
 
 def _open_app(a: dict) -> str:
@@ -292,15 +292,15 @@ def _open_app(a: dict) -> str:
             subprocess.Popen(["open", "-a", name])
         else:
             subprocess.Popen([name.replace(" ", "-")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return f"{name} khol raha hoon."
+        return f"{name} खोल रहा हूँ।"
     except (OSError, KeyError):
         webbrowser.open("https://www.google.com/search?q=" + urllib.parse.quote_plus(name))
-        return f"{name} mere paas nahi mila, Google pe dhoondh raha hoon."
+        return f"{name} मुझे नहीं मिला, Google पे ढूँढ रहा हूँ।"
 
 
 def _volume(direction: str) -> str:
     if sys.platform != "win32":
-        return "Volume control abhi sirf Windows pe chalta hai."
+        return "Volume control अभी सिर्फ़ Windows पे चलता है।"
     import ctypes
 
     keys = {"up": 0xAF, "down": 0xAE, "mute": 0xAD}
@@ -308,23 +308,23 @@ def _volume(direction: str) -> str:
     for _ in range(presses):
         ctypes.windll.user32.keybd_event(keys[direction], 0, 0, 0)
         ctypes.windll.user32.keybd_event(keys[direction], 0, 2, 0)
-    return {"up": "Awaaz badha di.", "down": "Awaaz kam kar di.", "mute": "Mute kar diya."}[direction]
+    return {"up": "आवाज़ बढ़ा दी।", "down": "आवाज़ कम कर दी।", "mute": "Mute कर दिया।"}[direction]
 
 
 def _screenshot() -> str:
     try:
         from PIL import ImageGrab
     except ImportError:
-        return "Screenshot ke liye Pillow install karo: pip install pillow"
+        return "Screenshot के लिए Pillow install करो: pip install pillow"
     out = Path.home() / "Pictures"
     out.mkdir(exist_ok=True)
     path = out / f"buddy-{dt.datetime.now():%Y%m%d-%H%M%S}.png"
     ImageGrab.grab().save(path)
-    return f"Screenshot Pictures folder mein save kar diya."
+    return "Screenshot Pictures folder में save कर दिया।"
 
 
 def _lock() -> str:
     if sys.platform == "win32":
         subprocess.Popen(["rundll32.exe", "user32.dll,LockWorkStation"])
-        return "Screen lock kar raha hoon."
-    return "Lock abhi sirf Windows pe chalta hai."
+        return "Screen lock कर रहा हूँ।"
+    return "Lock अभी सिर्फ़ Windows पे चलता है।"

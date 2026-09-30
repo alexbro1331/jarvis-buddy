@@ -16,7 +16,10 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     (tmp_path / "Desktop").mkdir()
-    return Config(tmp_path / "config.json")
+    c = Config(tmp_path / "config.json")
+    c["anthropic_api_key"] = "sk-test"  # these tests drive the Claude path with a fake client
+    c["brain_order"] = ["claude"]
+    return c
 
 
 class FakeClient:
@@ -85,14 +88,20 @@ def test_bad_tool_input_is_reported_not_raised(cfg):
 
 def test_refusal(cfg):
     c = FakeClient(NS(stop_reason="refusal", content=[]))
-    assert "madad nahi" in brain.Brain(cfg, client=c).ask("x")
+    assert "मदद नहीं" in brain.Brain(cfg, client=c).ask("x")
 
 
-def test_api_key_lookup(cfg, monkeypatch):
+def test_provider_availability(cfg, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cfg["anthropic_api_key"] = ""
+    cfg["brain_order"] = ["gemini", "groq", "ollama", "claude"]
     assert not brain.available(cfg)
-    cfg["anthropic_api_key"] = "sk-test"
-    assert brain.available(cfg)
+    cfg["groq_api_key"] = "gsk-x"
+    assert brain.usable_providers(cfg) == ["groq"]
+    cfg["gemini_api_key"] = "g-x"
+    cfg["use_ollama"] = True
+    cfg["anthropic_api_key"] = "sk-x"
+    assert brain.usable_providers(cfg) == ["gemini", "groq", "ollama", "claude"]
 
 
 def test_voice_choice():

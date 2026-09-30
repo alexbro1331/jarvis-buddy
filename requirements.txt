@@ -1,9 +1,12 @@
 PyQt6>=6.6
 sounddevice>=0.4.6
 numpy>=1.24,<2.3
-SpeechRecognition>=3.10
+requests>=2.31         # free AI providers + Whisper speech-to-text
+SpeechRecognition>=3.10  # Google recognizer (fallback)
 edge-tts>=6.1          # natural neural voices (needs internet)
 pyttsx3>=2.90          # offline voice fallback
-anthropic>=1.9         # Claude brain
+anthropic>=1.9         # optional: Claude as a brain
 opencv-python-headless>=4.8,<4.11   # only for --make-avatar (needs the Haar face detector)
 pillow>=10             # screenshots
+# Optional, fully offline speech recognition (menu -> Speech recognition -> "On this PC"):
+# faster-whisper>=1.0

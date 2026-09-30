@@ -13,7 +13,15 @@ DEFAULTS = {
     "language": "en-IN",  # speech recognition language; try "hi-IN" for Hindi
     "speak_replies": True,
     "voice_gender": "male",  # male / female (neural voices)
-    "anthropic_api_key": "",  # set from the menu; stored in this file
+    # --- AI keys: set from the menu, stored in this file on your PC ---
+    "gemini_api_key": "",  # free: https://aistudio.google.com/apikey
+    "groq_api_key": "",  # free: https://console.groq.com/keys  (also gives free Whisper speech-to-text)
+    "anthropic_api_key": "",  # optional, paid
+    "use_ollama": False,  # run a local model with Ollama instead (free, offline)
+    "brain_order": ["gemini", "groq", "ollama", "claude"],  # tried in this order; next one on rate limit
+    "stt_engine": "auto",  # auto = Groq Whisper if a Groq key exists, else Google; or groq / local / google
+    "stt_language": "",  # "" = auto-detect (best for Hinglish); or "hi" / "en"
+    "local_stt_model": "small",  # faster-whisper model size for stt_engine "local"
     "asked_key": False,
     "pos": None,  # [x, y] of the character window
     "size": 200,

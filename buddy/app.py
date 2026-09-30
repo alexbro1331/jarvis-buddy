@@ -10,7 +10,7 @@ import webbrowser
 
 from PyQt6.QtCore import QLockFile, QObject, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMenu, QSystemTrayIcon
+from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import autostart, brain, commands
 from .character import IDLE, LISTENING, SPEAKING, THINKING, Bubble, Character
@@ -64,12 +64,12 @@ class _Thinker(QObject):
             else:
                 webbrowser.open("https://www.google.com/search?q=" + urllib.parse.quote_plus(text))
                 self.done.emit(
-                    "Ye mujhe nahi aata, isliye Google pe dhoondh raha hoon. "
-                    "Smart jawab chahiye to menu se Claude API key daal do.",
+                    "ये मुझे नहीं आता, इसलिए Google पे ढूँढ रहा हूँ। "
+                    "Smart जवाब चाहिए तो menu से free API key जोड़ दो।",
                     False,
                 )
         except Exception as e:  # never let a bad command kill the assistant
-            self.done.emit(f"Kuch gadbad ho gayi: {e}", False)
+            self.done.emit(f"कुछ गड़बड़ हो गई: {e}", False)
 
 
 class BuddyApp:
@@ -77,7 +77,7 @@ class BuddyApp:
         self.app, self.cfg = app, cfg
         self.character = Character(cfg["size"])
         self.bubble = Bubble()
-        self.listener = Listener(cfg["language"])
+        self.listener = Listener(cfg["language"], cfg)
         self.speaker = Speaker(cfg["speak_replies"], cfg["voice_gender"])
         self.thinker = _Thinker(cfg)
         self.user_hidden = False
@@ -93,6 +93,7 @@ class BuddyApp:
         self.thinker.timer_requested.connect(self._on_timer)
         self.speaker.started.connect(lambda: self.character.set_state(SPEAKING))
         self.speaker.finished.connect(self._on_speech_done)
+        self.speaker.degraded.connect(lambda msg: self.bubble.show_text(msg, self.character, 10))
 
         self._place_initial()
         self._setup_tray()
@@ -102,7 +103,7 @@ class BuddyApp:
         self._fs_timer.timeout.connect(self._check_fullscreen)
         self._fs_timer.start(1000)
 
-        QTimer.singleShot(600, lambda: self.say(f"Namaste {cfg['user_name']}! Main {cfg['name']} hoon. Mujhe tap karo aur bolo!"))
+        QTimer.singleShot(600, lambda: self.say(f"नमस्ते {cfg['user_name']}! मैं {cfg['name']} हूँ। मुझे tap करो और बोलो!"))
         if not self.thinker.smart and not cfg["asked_key"]:
             QTimer.singleShot(4500, self._first_run_key_prompt)
 
@@ -161,28 +162,62 @@ class BuddyApp:
     def _on_timer(self, minutes: float, label: str) -> None:
         QTimer.singleShot(
             int(minutes * 60_000),
-            lambda: self.say(f"{self.cfg['user_name']}, yaad dilana tha: {label}", 12),
+            lambda: self.say(f"{self.cfg['user_name']}, याद दिलाना था: {label}", 12),
         )
 
-    # ------------------------------------------------------------ Claude key
+    # ------------------------------------------------------------ AI keys
+    KEY_CHOICES = {
+        "Gemini (free) - AI brain": ("gemini", "gemini_api_key", "https://aistudio.google.com/apikey"),
+        "Groq (free) - AI brain + best speech recognition": ("groq", "groq_api_key", "https://console.groq.com/keys"),
+        "Claude (paid, optional)": ("claude", "anthropic_api_key", "https://console.anthropic.com/settings/keys"),
+    }
+
     def _first_run_key_prompt(self) -> None:
         self.cfg["asked_key"] = True
         self.cfg.save()
-        self.say("Mujhe asli AI assistant banana hai to ek Claude API key chahiye. Abhi daal do, ya baad mein menu se.", 8)
-        self.set_api_key()
+        self.say("असली AI बनने के लिए मुझे एक free API key चाहिए। Gemini और Groq दोनों free हैं, अभी जोड़ लो।", 9)
+        self.setup_keys()
 
-    def set_api_key(self) -> None:
-        key, ok = QInputDialog.getText(
-            None,
-            f"{self.cfg['name']} - Claude API key",
-            "Claude API key (console.anthropic.com se milti hai).\nIse dalne se main har sawaal ka jawab de sakta hoon:",
-            QLineEdit.EchoMode.Password,
+    def setup_keys(self) -> None:
+        """Pick a service, optionally open its free-key page, paste the key."""
+        title = f"{self.cfg['name']} - AI keys"
+        labels = list(self.KEY_CHOICES)
+        choice, ok = QInputDialog.getItem(
+            None, title,
+            "Kaunsi service ki key daalni hai?\n\n"
+            "Gemini aur Groq dono FREE hain (credit card nahi chahiye).\n"
+            "Best setup: dono, taaki ek ki limit khatam ho to doosri kaam kare.",
+            labels, 1, False,
         )
+        if not ok:
+            return
+        name, field, url = self.KEY_CHOICES[choice]
+        if QMessageBox.question(None, title, f"Key banane ka page browser mein kholun?\n{url}") == QMessageBox.StandardButton.Yes:
+            webbrowser.open(url)
+        key, ok = QInputDialog.getText(None, title, f"{choice}\nKey yahan paste karo:", QLineEdit.EchoMode.Password)
         if ok and key.strip():
-            self.cfg["anthropic_api_key"] = key.strip()
+            self.cfg[field] = key.strip()
             self.cfg.save()
             self.thinker.reload()
-            self.say("Badhiya! Ab main poori tarah smart hoon. Kuch bhi poocho.", 5)
+            extra = " Groq की key से मेरी सुनने की क्षमता भी बेहतर हो गई।" if name == "groq" else ""
+            self.say("बढ़िया! अब मैं smart हो गया, कुछ भी पूछो।" + extra, 6)
+
+    def key_status(self) -> str:
+        have = [label for label, key in (("Gemini", "gemini_api_key"), ("Groq", "groq_api_key"), ("Claude", "anthropic_api_key")) if self.cfg[key]]
+        if self.cfg["use_ollama"]:
+            have.append("Ollama")
+        return ", ".join(have) if have else "none"
+
+    def _toggle_ollama(self, on: bool) -> None:
+        self.cfg["use_ollama"] = on
+        self.cfg.save()
+        self.thinker.reload()
+        self.bubble.show_text("Local AI chalu. Ollama install karke `ollama pull qwen3:8b` chalana hoga." if on else "Local AI band.", self.character, 6)
+
+    def _set_stt(self, engine: str) -> None:
+        self.cfg["stt_engine"] = engine
+        self.cfg.save()
+        self.bubble.show_text(f"Speech recognition: {engine}", self.character, 3)
 
     def _on_speech_done(self) -> None:
         self.character.set_state(IDLE)
@@ -210,8 +245,24 @@ class BuddyApp:
         speak.toggled.connect(self._toggle_speak)
         menu.addAction(speak)
 
-        key_label = "🔑 Claude API key ✓" if self.thinker.smart else "🔑 Set Claude API key…"
-        menu.addAction(key_label, self.set_api_key)
+        menu.addAction(f"🔑 AI keys… ({self.key_status()})", self.setup_keys)
+
+        stt = menu.addMenu("👂 Speech recognition")
+        for label, engine in (
+            ("Auto (Groq if key, else Google)", "auto"),
+            ("Groq Whisper (free, best for Hinglish)", "groq"),
+            ("On this PC (faster-whisper, offline)", "local"),
+            ("Google (basic)", "google"),
+        ):
+            act = QAction(label, stt, checkable=True)
+            act.setChecked(self.cfg["stt_engine"] == engine)
+            act.triggered.connect(lambda _=False, e=engine: self._set_stt(e))
+            stt.addAction(act)
+
+        ollama = QAction("🧠 Local AI (Ollama, offline)", menu, checkable=True)
+        ollama.setChecked(self.cfg["use_ollama"])
+        ollama.toggled.connect(self._toggle_ollama)
+        menu.addAction(ollama)
 
         voice = menu.addMenu("🎙 Voice")
         for label, gender in (("Male", "male"), ("Female", "female")):
@@ -258,7 +309,7 @@ class BuddyApp:
         self.cfg["voice_gender"] = gender
         self.speaker.gender = gender
         self.cfg.save()
-        self.say("Ye meri nayi awaaz hai. Kaisi lagi?", 4)
+        self.say("ये मेरी नई आवाज़ है। कैसी लगी?", 4)
 
     def _set_language(self, code: str) -> None:
         self.cfg["language"] = code

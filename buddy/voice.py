@@ -10,6 +10,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QUrl, pyqtSignal
 
+from . import providers
+
 RATE = 16000
 
 # Microsoft neural voices (via edge-tts). Hindi voices for Devanagari text, Indian-English voices
@@ -19,6 +21,20 @@ VOICES = {
     "female": {"hi": "hi-IN-SwaraNeural", "en": "en-IN-NeerjaNeural"},
 }
 DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
+
+_URL = re.compile(r"https?://\S+")
+_MARKUP = re.compile(r"[*_`#>~|\[\]{}<>^]+")
+_EMOJI = re.compile("[\U0001F000-\U0001FFFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]")
+
+
+def clean_for_speech(text: str) -> str:
+    """Strip everything a voice would read out awkwardly (markdown, emojis, links, stray symbols)."""
+    text = _URL.sub(" ", text)
+    text = _EMOJI.sub(" ", text)
+    text = _MARKUP.sub(" ", text)
+    text = re.sub(r"\s*[-\u2013\u2014]{2,}\s*", ", ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def pick_voice(text: str, gender: str = "male") -> str:
@@ -32,9 +48,10 @@ class Listener(QObject):
     heard = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, language: str = "en-IN"):
+    def __init__(self, language: str = "en-IN", cfg=None):
         super().__init__()
         self.language = language
+        self.cfg = cfg
         self._busy = False
 
     @property
@@ -53,27 +70,55 @@ class Listener(QObject):
             if audio is None:
                 self.failed.emit("Kuch sunai nahi diya. Mic ke paas bolo aur phir se tap karo.")
                 return
-            import speech_recognition as sr
-
-            data = sr.AudioData(audio, RATE, 2)
-            rec = sr.Recognizer()
-            # Hinglish speakers are often recognised better by the other language model,
-            # so try the configured language first and the other one as a backup.
-            other = "hi-IN" if self.language.lower().startswith("en") else "en-IN"
-            for lang in (self.language, other):
-                try:
-                    self.heard.emit(rec.recognize_google(data, language=lang))
-                    return
-                except sr.UnknownValueError:
-                    continue
-                except sr.RequestError:
-                    self.failed.emit("Internet nahi hai, awaaz samajhne ke liye internet chahiye.")
-                    return
-            self.failed.emit("Awaaz clear nahi aayi. Thoda paas se aur saaf bolo.")
+            try:
+                text = self._transcribe(audio)
+            except providers.ProviderError:
+                self.failed.emit("Internet nahi hai, awaaz samajhne ke liye internet chahiye.")
+                return
+            if not text:
+                self.failed.emit("Awaaz clear nahi aayi. Thoda paas se aur saaf bolo.")
+                return
+            self.heard.emit(text)
         except Exception as e:  # mic missing, driver error, ...
             self.failed.emit(f"Mic problem: {e}")
         finally:
             self._busy = False
+
+    # -- speech to text ---------------------------------------------------------------------
+    def engine(self) -> str:
+        choice = self.cfg.data.get("stt_engine", "auto") if self.cfg else "google"
+        if choice == "auto":
+            return "groq" if self.cfg and providers.api_key(self.cfg, "groq") else "google"
+        return choice
+
+    def _transcribe(self, pcm: bytes) -> str:
+        """Best engine first (Groq Whisper / local Whisper), Google's free recognizer as the safety net."""
+        engine = self.engine()
+        try:
+            if engine == "groq":
+                return providers.transcribe_groq(self.cfg, pcm, RATE)
+            if engine == "local":
+                return providers.transcribe_local(self.cfg, pcm)
+        except providers.ProviderError:
+            pass  # rate limit / offline / bad key -> fall through to Google
+        return self._transcribe_google(pcm)
+
+    def _transcribe_google(self, pcm: bytes) -> str:
+        import speech_recognition as sr
+
+        data = sr.AudioData(pcm, RATE, 2)
+        rec = sr.Recognizer()
+        # Hinglish speakers are often recognised better by the other language model,
+        # so try the configured language first and the other one as a backup.
+        other = "hi-IN" if self.language.lower().startswith("en") else "en-IN"
+        for lang in (self.language, other):
+            try:
+                return rec.recognize_google(data, language=lang)
+            except sr.UnknownValueError:
+                continue
+            except sr.RequestError as e:
+                raise providers.Unavailable("google stt") from e
+        return ""
 
     def _record(self) -> bytes | None:
         """Record until the user stops talking. Returns raw 16-bit mono PCM or None."""
@@ -123,6 +168,7 @@ class Speaker(QObject):
 
     started = pyqtSignal()
     finished = pyqtSignal()
+    degraded = pyqtSignal(str)  # natural voice failed once; explains why the robotic fallback is used
     _ready = pyqtSignal(str)  # path of the synthesized mp3, delivered on the UI thread
 
     def __init__(self, enabled: bool = True, gender: str = "male"):
@@ -131,10 +177,12 @@ class Speaker(QObject):
         self.gender = gender
         self._player = None
         self._audio = None
+        self._warned = False
         self._ready.connect(self._play)
 
     def say(self, text: str) -> None:
-        if not self.enabled or not text.strip():
+        text = clean_for_speech(text)
+        if not self.enabled or not text:
             self.finished.emit()
             return
         self.stop()
@@ -150,9 +198,13 @@ class Speaker(QObject):
             import edge_tts
 
             out = Path(tempfile.mkdtemp(prefix="buddy-tts-")) / "say.mp3"
-            asyncio.run(edge_tts.Communicate(text, pick_voice(text, self.gender), rate="+6%").save(str(out)))
+            asyncio.run(edge_tts.Communicate(text, pick_voice(text, self.gender), rate="+4%").save(str(out)))
             self._ready.emit(str(out))
-        except Exception:
+        except Exception as e:
+            if not self._warned:
+                self._warned = True
+                why = "edge-tts install nahi hai (pip install edge-tts)" if isinstance(e, ImportError) else "internet/edge-tts problem"
+                self.degraded.emit(f"Natural awaaz nahi chal payi ({why}), isliye system ki robotic awaaz use ho rahi hai.")
             self._fallback(text)
 
     def _play(self, path: str) -> None:
