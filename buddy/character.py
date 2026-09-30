@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
+from pathlib import Path
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
-    QBrush, QColor, QCursor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath,
+    QBrush, QImage, QPixmap, QColor, QCursor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath,
     QPen, QRadialGradient,
 )
 from PyQt6.QtWidgets import QApplication, QWidget
@@ -36,6 +38,7 @@ class Character(QWidget):
 
         self.state = IDLE
         self._t = 0.0
+        self._head, self._meta = _load_head()
         self._blink = 0.0  # 0 open .. 1 closed
         self._next_blink = 2.0
         self._press_global: QPointF | None = None
@@ -69,6 +72,11 @@ class Character(QWidget):
         s = self.width()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        if self._head is not None:
+            self._paint_avatar(p, s)
+            p.end()
+            return
         t = self._t
 
         # bounce / squash-and-stretch; bigger when listening or speaking
@@ -196,6 +204,133 @@ class Character(QWidget):
             p.setBrush(QColor(255, 110, 140))
             p.drawEllipse(QPointF(x + s * 0.04, y + s * 0.045), s * 0.028, s * 0.03)
 
+
+    # ------------------------------------------------- photo-based avatar
+    def _paint_avatar(self, p: QPainter, s: int) -> None:
+        t, state = self._t, self.state
+        amp = {IDLE: 0.015, LISTENING: 0.04, THINKING: 0.02, SPEAKING: 0.05}[state]
+        speed = {IDLE: 2.0, LISTENING: 5.0, THINKING: 2.5, SPEAKING: 9.0}[state]
+        wob = math.sin(t * speed)
+        bounce = -abs(math.sin(t * speed * 0.5)) * s * amp * 1.6
+        sx, sy = 1 + amp * wob, 1 - amp * wob
+
+        cx = s / 2
+        ground = s * 0.965
+
+        # ground shadow
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 60))
+        p.drawEllipse(QPointF(cx, ground), s * 0.26 * (1 + bounce / s), s * 0.035)
+
+        # listening ring / thinking stars / speaking waves
+        if state == LISTENING:
+            ph = (t * 1.6) % 1
+            p.setPen(QPen(QColor(0, 220, 255, int(200 * (1 - ph))), 3))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            r = s * (0.30 + 0.22 * ph)
+            p.drawEllipse(QPointF(cx, s * 0.42 + bounce), r, r)
+
+        # --- body: tiny funny torso + feet ---
+        body_top = s * 0.66 + bounce
+        bw, bh = s * 0.22 * sx, s * 0.17 * sy
+        grad = QLinearGradient(cx - bw, body_top, cx + bw, body_top + bh * 2)
+        grad.setColorAt(0, QColor(120, 100, 255))
+        grad.setColorAt(1, QColor(60, 180, 220))
+        p.setPen(QPen(QColor(50, 35, 90), 3))
+        p.setBrush(QBrush(grad))
+        p.drawRoundedRect(QRectF(cx - bw, body_top, bw * 2, bh * 1.6), bw * 0.7, bw * 0.7)
+        # belly shine
+        shine = QRadialGradient(QPointF(cx - bw * 0.4, body_top + bh * 0.3), bw)
+        shine.setColorAt(0, QColor(255, 255, 255, 120))
+        shine.setColorAt(1, QColor(255, 255, 255, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(shine))
+        p.drawRoundedRect(QRectF(cx - bw, body_top, bw * 2, bh * 1.6), bw * 0.7, bw * 0.7)
+        # feet
+        p.setPen(QPen(QColor(50, 35, 90), 2))
+        p.setBrush(QColor(255, 255, 255))
+        for fx in (-0.5, 0.5):
+            p.drawEllipse(QPointF(cx + bw * fx, body_top + bh * 1.62), s * 0.07, s * 0.032)
+        # arms: wave when speaking, hands-up when listening, scratch-head when thinking
+        arm_len = s * 0.14
+        for side in (-1, 1):
+            sh = QPointF(cx + side * bw * 0.95, body_top + bh * 0.45)
+            if state == SPEAKING:
+                ang = math.radians(-50 - 25 * math.sin(t * 10 + (0 if side > 0 else 1.6)))
+            elif state == LISTENING:
+                ang = math.radians(-100 + 10 * math.sin(t * 6))
+            elif state == THINKING and side > 0:
+                ang = math.radians(-125 + 8 * math.sin(t * 8))
+            else:
+                ang = math.radians(40 + 6 * math.sin(t * 2 + side))
+            dx, dy = math.cos(ang) * side, math.sin(ang)
+            hand = QPointF(sh.x() + dx * arm_len, sh.y() + dy * arm_len)
+            p.setPen(QPen(QColor(50, 35, 90), s * 0.05, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(sh, hand)
+            p.setPen(QPen(QColor(255, 220, 190), s * 0.035, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(sh, hand)
+
+        # --- head: big bobblehead that tilts on the neck ---
+        head = self._head
+        hw = s * 0.56 * sx
+        hh = hw * head.height() / head.width() * sy
+        neck = QPointF(cx, body_top + s * 0.02)
+        tilt = {IDLE: 4, LISTENING: 7, THINKING: 10, SPEAKING: 6}[state] * math.sin(t * speed * 0.5)
+        if state == THINKING:
+            tilt += 8
+        p.save()
+        p.translate(neck)
+        p.rotate(tilt)
+        rect = QRectF(-hw / 2, -hh * 0.93, hw, hh)
+        p.drawPixmap(rect, head, QRectF(head.rect()))
+        self._head_overlays(p, rect)
+        p.restore()
+
+        # --- floating status icons (drawn unrotated) ---
+        if state == THINKING:
+            p.setPen(QPen(QColor(50, 35, 90), 2))
+            for i in range(3):
+                a = t * 4 + i * 2.09
+                p.setBrush(QColor(255, 200, 60))
+                p.drawEllipse(QPointF(cx + math.cos(a) * s * 0.3, s * 0.08 + math.sin(a) * s * 0.05), s * 0.03, s * 0.03)
+
+    def _head_overlays(self, p: QPainter, rect: QRectF) -> None:
+        """Mouth / eyelids drawn on top of the photo head (rect = where the head is drawn)."""
+        meta = self._meta
+        w, h = rect.width(), rect.height()
+
+        def at(fx, fy):
+            return QPointF(rect.x() + fx * w, rect.y() + fy * h)
+
+        # eyelids for blinking (only if both eyes were located reliably)
+        if meta.get("eyes_ok") and self._blink > 0.2:
+            skin = QColor(*meta.get("skin", (225, 170, 140)))
+            p.setPen(QPen(skin.darker(150), 1))
+            p.setBrush(skin)
+            for ex, ey, er in meta["eyes"]:
+                c = at(ex, ey)
+                p.drawEllipse(c, er * w * 1.25, er * w * 0.7 * self._blink)
+
+        mx, my, mr = meta["mouth"]
+        c = at(mx, my)
+        if self.state == SPEAKING:
+            open_ = 0.25 + 0.75 * abs(math.sin(self._t * 13))
+            p.setPen(QPen(QColor(60, 15, 30), 2))
+            p.setBrush(QColor(110, 20, 40))
+            p.drawEllipse(c, mr * w * 0.55, mr * w * 0.42 * open_)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(240, 110, 130))
+            p.drawEllipse(QPointF(c.x(), c.y() + mr * w * 0.25 * open_), mr * w * 0.3, mr * w * 0.14 * open_)
+        elif self.state == LISTENING:
+            p.setPen(QPen(QColor(60, 15, 30), 2))
+            p.setBrush(QColor(110, 20, 40))
+            p.drawEllipse(c, mr * w * 0.2, mr * w * 0.26)  # surprised "o"
+        elif self.state == IDLE and int(self._t * 10) % 90 < 6:
+            # cheeky tongue-out every few seconds
+            p.setPen(QPen(QColor(120, 30, 50), 2))
+            p.setBrush(QColor(240, 110, 130))
+            p.drawEllipse(QPointF(c.x() + mr * w * 0.1, c.y() + mr * w * 0.45), mr * w * 0.22, mr * w * 0.3)
+
     # ------------------------------------------------------------ interaction
     def mousePressEvent(self, e) -> None:  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:
@@ -235,6 +370,38 @@ class Character(QWidget):
         x = min(max(self.x(), g.left() - self.width() // 3), g.right() - self.width() * 2 // 3)
         y = min(max(self.y(), g.top()), g.bottom() - self.height() // 2)
         self.move(x, y)
+
+
+
+def _load_head() -> tuple[QPixmap | None, dict]:
+    """Load assets/head.png (made by `python -m buddy --make-avatar photo.jpg`), with 3D-style lighting."""
+    from .avatar import ASSETS
+
+    png, meta_file = ASSETS / "head.png", ASSETS / "head.json"
+    if not png.exists() or not meta_file.exists():
+        return None, {}
+    img = QImage(str(png)).convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    if img.isNull():
+        return None, {}
+    try:
+        meta = json.loads(meta_file.read_text())
+    except ValueError:
+        return None, {}
+
+    # bake soft lighting: highlight from the top-left, shadow on the bottom-right rim
+    w, h = img.width(), img.height()
+    p = QPainter(img)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceAtop)
+    hi = QRadialGradient(QPointF(w * 0.30, h * 0.22), w * 0.55)
+    hi.setColorAt(0, QColor(255, 255, 255, 70))
+    hi.setColorAt(1, QColor(255, 255, 255, 0))
+    p.fillRect(img.rect(), hi)
+    sh = QRadialGradient(QPointF(w * 0.40, h * 0.40), w * 0.85)
+    sh.setColorAt(0.6, QColor(20, 0, 50, 0))
+    sh.setColorAt(1, QColor(20, 0, 50, 110))
+    p.fillRect(img.rect(), sh)
+    p.end()
+    return QPixmap.fromImage(img), meta
 
 
 class Bubble(QWidget):

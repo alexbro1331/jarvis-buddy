@@ -1,7 +1,9 @@
 PyQt6>=6.6
 sounddevice>=0.4.6
-numpy>=1.24
+numpy>=1.24,<2.3
 SpeechRecognition>=3.10
-pyttsx3>=2.90
-# Optional: smarter fallback brain (set ANTHROPIC_API_KEY to enable)
-anthropic>=0.40
+edge-tts>=6.1          # natural neural voices (needs internet)
+pyttsx3>=2.90          # offline voice fallback
+anthropic>=1.9         # Claude brain
+opencv-python-headless>=4.8,<4.11   # only for --make-avatar (needs the Haar face detector)
+pillow>=10             # screenshots

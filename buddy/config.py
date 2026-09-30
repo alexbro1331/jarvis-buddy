@@ -9,11 +9,15 @@ from pathlib import Path
 
 DEFAULTS = {
     "name": "Buddy",
+    "user_name": "Chandan",
     "language": "en-IN",  # speech recognition language; try "hi-IN" for Hindi
     "speak_replies": True,
+    "voice_gender": "male",  # male / female (neural voices)
+    "anthropic_api_key": "",  # set from the menu; stored in this file
+    "asked_key": False,
     "pos": None,  # [x, y] of the character window
-    "size": 150,
-    "claude_model": "claude-sonnet-5-5",
+    "size": 200,
+    "claude_model": "claude-opus-5-5",  # or "claude-sonnet-5-5" for cheaper/faster
     "folder_location": "Desktop",  # where "create folder" puts new folders
 }
 
