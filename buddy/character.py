@@ -49,6 +49,12 @@ class Character(QWidget):
         self._timer.timeout.connect(self._tick)
         self._timer.start(33)
 
+    def reload_head(self) -> bool:
+        """Pick up a freshly generated assets/head.png without restarting. Returns True if a face is loaded."""
+        self._head, self._meta = _load_head()
+        self.update()
+        return self._head is not None
+
     # ------------------------------------------------------------------ state
     def set_state(self, state: str) -> None:
         self.state = state
@@ -407,7 +413,7 @@ def _load_head() -> tuple[QPixmap | None, dict]:
 class Bubble(QWidget):
     """Speech bubble shown next to the character. Ignores the mouse entirely."""
 
-    def __init__(self):
+    def __init__(self, user: bool = False):
         super().__init__()
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool
@@ -415,29 +421,37 @@ class Bubble(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.user = user  # True = "what you said" bubble (blue), False = the assistant's reply (white)
         self._text = ""
         self._font = QFont("Segoe UI", 11)
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide)
 
-    def show_text(self, text: str, anchor: Character, seconds: float = 5.0) -> None:
+    def show_text(self, text: str, anchor: Character, seconds: float = 5.0, stack_on: "Bubble | None" = None) -> None:
         self._text = text
         max_w = 280
         fm = QFontMetrics(self._font)
         rect = fm.boundingRect(0, 0, max_w, 1000, int(Qt.TextFlag.TextWordWrap), text)
         self.resize(rect.width() + 28, rect.height() + 28 + 10)
-        self._place(anchor)
+        self._place(anchor, stack_on)
         self.show()
         self.raise_()
         self.update()
         self._hide_timer.start(int(seconds * 1000 + len(text) * 40))
 
-    def _place(self, anchor: Character) -> None:
+    def restack(self, anchor: Character, stack_on: "Bubble") -> None:
+        """Move this (already visible) bubble on top of another one without changing its text/timer."""
+        self._place(anchor, stack_on)
+
+    def _place(self, anchor: Character, stack_on: "Bubble | None" = None) -> None:
         screen = QApplication.screenAt(anchor.geometry().center()) or QApplication.primaryScreen()
         g = screen.availableGeometry()
         x = anchor.x() + anchor.width() // 2 - self.width() // 2
-        y = anchor.y() - self.height() + 6
+        if stack_on is not None and stack_on.isVisible():
+            y = stack_on.y() - self.height() + 4  # sits on top of the other bubble
+        else:
+            y = anchor.y() - self.height() + 6
         if y < g.top():  # no room above -> show below
             y = anchor.y() + anchor.height() - 6
         x = min(max(x, g.left() + 4), g.right() - self.width() - 4)
@@ -447,14 +461,15 @@ class Bubble(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         body = QRectF(2, 2, self.width() - 4, self.height() - 14)
+        fill = QColor(214, 234, 255, 245) if self.user else QColor(255, 255, 255, 245)
         p.setPen(QPen(QColor(50, 40, 110), 2))
-        p.setBrush(QColor(255, 255, 255, 245))
+        p.setBrush(fill)
         p.drawRoundedRect(body, 14, 14)
         # little tail
         tail = QPainterPath(QPointF(self.width() / 2 - 8, body.bottom() - 1))
         tail.lineTo(self.width() / 2, self.height() - 3)
         tail.lineTo(self.width() / 2 + 8, body.bottom() - 1)
-        p.setBrush(QColor(255, 255, 255, 245))
+        p.setBrush(fill)
         p.drawPath(tail)
         p.setPen(QColor(30, 25, 70))
         p.setFont(self._font)

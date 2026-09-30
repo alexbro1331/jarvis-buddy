@@ -23,6 +23,7 @@ DEFAULTS = {
     "stt_language": "",  # "" = auto-detect (best for Hinglish); or "hi" / "en"
     "local_stt_model": "small",  # faster-whisper model size for stt_engine "local"
     "asked_key": False,
+    "asked_face": False,
     "pos": None,  # [x, y] of the character window
     "size": 200,
     "claude_model": "claude-opus-5-5",  # or "claude-sonnet-5-5" for cheaper/faster

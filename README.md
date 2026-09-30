@@ -19,9 +19,10 @@ voice-controlled AI personal assistant (Jarvis-style) on your laptop.
 2. In this folder:
    ```
    pip install -r requirements.txt
-   python -m buddy --make-avatar C:\path\to\your\photo.jpg     # builds your cartoon face (runs locally)
    python -m buddy
    ```
+   On first start Buddy asks you to pick a photo (clear, front-facing) and builds your cartoon face on the spot.
+   Change it any time: right-click Buddy → **Change my face…**.
 3. On first start Buddy asks for a free **API key** — see "Free AI setup" below (2 minutes, no credit card).
    Paste it and it becomes a real AI assistant. (Skip it and add it later from the right-click menu → **AI keys**.)
 4. Tap the character and talk: *"open youtube"*, *"mujhe ek joke sunao"*, *"5 minute baad chai yaad dilana"*.
@@ -33,7 +34,7 @@ Local AI (Ollama), Voice (male/female), Language, Start with computer, Quit.
 
 ## Your cartoon face
 
-`python -m buddy --make-avatar photo.jpg` finds the face in any photo (front-facing works best), cuts out the head,
+Right-click → **Change my face…** (or `python -m buddy --make-avatar photo.jpg`) finds the face in any photo (front-facing works best), cuts out the head,
 gives it a painted-cartoon look and writes `assets/head.png` + `assets/head.json`. It all runs on your computer —
 the photo is never uploaded. Those two files are in `.gitignore` so your face doesn't end up on GitHub by accident.
 Without them Buddy shows a built-in cartoon blob instead.
@@ -98,6 +99,15 @@ variable also works for Claude). Don't share that file.
 `user_name`, `language`, `speak_replies`, `voice_gender`, `size` (px), `folder_location`, `brain_order`,
 `stt_engine` (`auto`/`groq`/`local`/`google`), `stt_language` (`""` = auto, or `hi` / `en`), `gemini_model`, `groq_model`,
 `ollama_model`, `claude_model` (default `claude-opus-5-5`; `claude-sonnet-5-5` is cheaper).
+
+## Something not working? Run the diagnosis
+
+```
+python -m buddy --diagnose
+```
+It checks packages, microphone, the natural voice (and plays a sample), your AI keys and the photo tool on *your* PC,
+and tells you exactly which part fails and why. Errors are also written to `%APPDATA%\jarvis-buddy\buddy.log`.
+The speech bubble shows what **you** said (blue, on top) and Buddy's reply (white, below it).
 
 ## Notes
 

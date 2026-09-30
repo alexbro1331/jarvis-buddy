@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 import threading
 import urllib.parse
 import webbrowser
 
 from PyQt6.QtCore import QLockFile, QObject, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMenu, QMessageBox, QSystemTrayIcon
+from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QLineEdit, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import autostart, brain, commands
+from . import autostart, avatar, brain, commands
 from .character import IDLE, LISTENING, SPEAKING, THINKING, Bubble, Character
 from .config import Config, config_dir
 from .fullscreen import foreground_is_fullscreen
+from .log import log
 from .voice import Listener, Speaker
 
 
@@ -76,7 +78,8 @@ class BuddyApp:
     def __init__(self, app: QApplication, cfg: Config):
         self.app, self.cfg = app, cfg
         self.character = Character(cfg["size"])
-        self.bubble = Bubble()
+        self.bubble = Bubble()  # the assistant's reply
+        self.user_bubble = Bubble(user=True)  # what you said, stays visible while it answers
         self.listener = Listener(cfg["language"], cfg)
         self.speaker = Speaker(cfg["speak_replies"], cfg["voice_gender"])
         self.thinker = _Thinker(cfg)
@@ -104,8 +107,7 @@ class BuddyApp:
         self._fs_timer.start(1000)
 
         QTimer.singleShot(600, lambda: self.say(f"नमस्ते {cfg['user_name']}! मैं {cfg['name']} हूँ। मुझे tap करो और बोलो!"))
-        if not self.thinker.smart and not cfg["asked_key"]:
-            QTimer.singleShot(4500, self._first_run_key_prompt)
+        QTimer.singleShot(3500, self._first_run_setup)
 
     # ------------------------------------------------------------ positioning
     def _place_initial(self) -> None:
@@ -130,6 +132,7 @@ class BuddyApp:
             self.auto_hidden = True
             self.character.hide()
             self.bubble.hide()
+            self.user_bubble.hide()
         elif not full and self.auto_hidden:
             self.auto_hidden = False
             self.character.show()
@@ -137,12 +140,15 @@ class BuddyApp:
     # --------------------------------------------------------------- talking
     def say(self, text: str, seconds: float = 4.0) -> None:
         self.bubble.show_text(text, self.character, seconds)
+        if self.user_bubble.isVisible():
+            self.user_bubble.restack(self.character, self.bubble)
         self.speaker.say(text)
 
     def start_listening(self) -> None:
         if self.listener.busy:
             return
         self.character.set_state(LISTENING)
+        self.user_bubble.hide()
         self.bubble.show_text("Boliye, sun raha hoon...", self.character, 8)
         self.listener.listen()
 
@@ -152,7 +158,9 @@ class BuddyApp:
 
     def _on_heard(self, text: str) -> None:
         self.character.set_state(THINKING)
-        self.bubble.show_text(f"“{text}”", self.character, 3)
+        log(f"heard: {text}")
+        self.bubble.hide()
+        self.user_bubble.show_text(f"तुम: {text}", self.character, 14)
         self.thinker.think(text)
 
     def _on_reply(self, reply: str, quit_after: bool) -> None:
@@ -172,11 +180,42 @@ class BuddyApp:
         "Claude (paid, optional)": ("claude", "anthropic_api_key", "https://console.anthropic.com/settings/keys"),
     }
 
-    def _first_run_key_prompt(self) -> None:
-        self.cfg["asked_key"] = True
-        self.cfg.save()
-        self.say("असली AI बनने के लिए मुझे एक free API key चाहिए। Gemini और Groq दोनों free हैं, अभी जोड़ लो।", 9)
-        self.setup_keys()
+    def _first_run_setup(self) -> None:
+        """One-time questions: your photo (for the cartoon face), then a free AI key."""
+        if not avatar.has_avatar() and not self.cfg["asked_face"]:
+            self.cfg["asked_face"] = True
+            self.cfg.save()
+            self.say("मुझे तुम्हारे चेहरे वाला character बनना है! एक साफ़, सामने से खींची photo चुनो।", 8)
+            self.choose_face()
+        if not self.thinker.smart and not self.cfg["asked_key"]:
+            self.cfg["asked_key"] = True
+            self.cfg.save()
+            self.say("असली AI बनने के लिए मुझे एक free API key चाहिए। Gemini और Groq दोनों free हैं, अभी जोड़ लो।", 9)
+            self.setup_keys()
+
+    def choose_face(self) -> None:
+        """Pick a photo -> build the cartoon head locally -> swap the character live."""
+        start = Path.home() / "Pictures"
+        path, _ = QFileDialog.getOpenFileName(
+            None, f"{self.cfg['name']} - apni photo chuno", str(start if start.exists() else Path.home()),
+            "Photos (*.jpg *.jpeg *.png *.webp *.bmp)",
+        )
+        if not path:
+            return
+        self.bubble.show_text("चेहरा बना रहा हूँ, 5 सेकंड...", self.character, 10)
+        self.app.processEvents()
+        try:
+            avatar.make_head(path)
+            ok = self.character.reload_head()
+        except ValueError as e:
+            self.bubble.show_text(str(e), self.character, 10)
+            return
+        except Exception as e:  # missing opencv etc.
+            log(f"make_head failed: {e!r}")
+            self.bubble.show_text(f"Chehra nahi ban paya: {e}. Terminal mein `python -m buddy --diagnose` chalao.", self.character, 12)
+            return
+        if ok:
+            self.say("वाह! ये तो बिल्कुल मैं हूँ, हैंडसम! कैसा लगा?", 5)
 
     def setup_keys(self) -> None:
         """Pick a service, optionally open its free-key page, paste the key."""
@@ -239,6 +278,7 @@ class BuddyApp:
         menu = QMenu()
         menu.addAction("🎤 Listen", self.start_listening)
         menu.addAction("👀 Show / Hide", self.toggle_visible)
+        menu.addAction("🧑 Change my face…", self.choose_face)
 
         speak = QAction("🔊 Speak replies", menu, checkable=True)
         speak.setChecked(self.cfg["speak_replies"])
@@ -297,6 +337,7 @@ class BuddyApp:
         if self.user_hidden:
             self.character.hide()
             self.bubble.hide()
+            self.user_bubble.hide()
         else:
             self.character.show()
 
@@ -331,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--install-autostart", action="store_true", help="start automatically at login")
     ap.add_argument("--uninstall-autostart", action="store_true")
     ap.add_argument("--make-avatar", metavar="PHOTO", help="build the cartoon character from your photo (runs locally)")
+    ap.add_argument("--diagnose", action="store_true", help="check voice, mic, keys and photo tool on this PC")
     ap.add_argument("--say", metavar="TEXT", help="run a typed command without the GUI (for testing)")
     args = ap.parse_args(argv)
 
@@ -342,11 +384,17 @@ def main(argv: list[str] | None = None) -> int:
         print(autostart.uninstall())
         return 0
     if args.make_avatar:
-        from .avatar import make_head
-
-        print("Saved", make_head(args.make_avatar))
+        try:
+            print("Saved", avatar.make_head(args.make_avatar))
+        except ValueError as e:
+            print(e)
+            return 1
         print("Restart Buddy to see your new character.")
         return 0
+    if args.diagnose:
+        from . import diagnose
+
+        return diagnose.run()
     if args.say:
         action = commands.parse(args.say)
         print(f"{action.kind} {action.args}")

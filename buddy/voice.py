@@ -11,6 +11,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QUrl, pyqtSignal
 
 from . import providers
+from .log import log
 
 RATE = 16000
 
@@ -162,14 +163,61 @@ class Listener(QObject):
         return np.concatenate(chunks).tobytes() if chunks else None
 
 
+class TtsError(Exception):
+    """No online voice could produce audio; the message lists why each one failed."""
+
+
+def synthesize(text: str, gender: str = "male") -> Path:
+    """Text -> mp3 file. Microsoft neural voice first (most natural), Google's voice as backup."""
+    out = Path(tempfile.mkdtemp(prefix="buddy-tts-")) / "say.mp3"
+    reasons = []
+    try:
+        import edge_tts
+
+        asyncio.run(edge_tts.Communicate(text, pick_voice(text, gender), rate="+4%").save(str(out)))
+        if out.exists() and out.stat().st_size > 500:
+            return out
+        reasons.append("edge-tts: empty audio")
+    except Exception as e:
+        reasons.append(f"edge-tts: {type(e).__name__}: {str(e)[:160]}")
+    try:
+        from gtts import gTTS
+
+        gTTS(text, lang="hi" if DEVANAGARI.search(text) else "en", tld="co.in").save(str(out))
+        if out.exists() and out.stat().st_size > 500:
+            return out
+        reasons.append("gTTS: empty audio")
+    except Exception as e:
+        reasons.append(f"gTTS: {type(e).__name__}: {str(e)[:160]}")
+    raise TtsError(" | ".join(reasons))
+
+
+def play_mp3_windows(path: str) -> bool:
+    """Play an mp3 with Windows' built-in MCI player (no Qt multimedia, no codecs to install)."""
+    import sys
+
+    if sys.platform != "win32":
+        return False
+    import ctypes
+
+    mci = ctypes.windll.winmm.mciSendStringW
+    mci("close buddy", None, 0, 0)
+    if mci(f'open "{path}" type mpegvideo alias buddy', None, 0, 0) != 0:
+        return False
+    ok = mci("play buddy wait", None, 0, 0) == 0
+    mci("close buddy", None, 0, 0)
+    return ok
+
+
 class Speaker(QObject):
-    """Text-to-speech. Uses natural neural voices (edge-tts, needs internet) and falls back
-    to the offline system voice (pyttsx3). Emits started/finished for the mouth animation."""
+    """Text-to-speech. Natural neural voice (needs internet) -> Google voice -> offline system voice.
+    Emits started/finished for the mouth animation, and `degraded` (with the real reason) whenever
+    the natural voice could not be used, so a robotic voice is never a silent mystery."""
 
     started = pyqtSignal()
     finished = pyqtSignal()
-    degraded = pyqtSignal(str)  # natural voice failed once; explains why the robotic fallback is used
-    _ready = pyqtSignal(str)  # path of the synthesized mp3, delivered on the UI thread
+    degraded = pyqtSignal(str)
+    _ready = pyqtSignal(str, str)  # (mp3 path, spoken text), delivered on the UI thread
 
     def __init__(self, enabled: bool = True, gender: str = "male"):
         super().__init__()
@@ -177,7 +225,8 @@ class Speaker(QObject):
         self.gender = gender
         self._player = None
         self._audio = None
-        self._warned = False
+        self._text = ""
+        self._warned_reason = ""
         self._ready.connect(self._play)
 
     def say(self, text: str) -> None:
@@ -192,22 +241,24 @@ class Speaker(QObject):
         if self._player is not None:
             self._player.stop()
 
-    # -- neural voice -------------------------------------------------------
+    def _warn(self, reason: str) -> None:
+        log(f"voice degraded: {reason}")
+        if reason != self._warned_reason:  # tell the user once per distinct problem
+            self._warned_reason = reason
+            self.degraded.emit(f"Natural awaaz nahi chal payi. Wajah: {reason[:220]}")
+
+    # -- online neural voice ---------------------------------------------------
     def _synth(self, text: str) -> None:
         try:
-            import edge_tts
-
-            out = Path(tempfile.mkdtemp(prefix="buddy-tts-")) / "say.mp3"
-            asyncio.run(edge_tts.Communicate(text, pick_voice(text, self.gender), rate="+4%").save(str(out)))
-            self._ready.emit(str(out))
-        except Exception as e:
-            if not self._warned:
-                self._warned = True
-                why = "edge-tts install nahi hai (pip install edge-tts)" if isinstance(e, ImportError) else "internet/edge-tts problem"
-                self.degraded.emit(f"Natural awaaz nahi chal payi ({why}), isliye system ki robotic awaaz use ho rahi hai.")
+            path = synthesize(text, self.gender)
+        except TtsError as e:
+            self._warn(str(e))
             self._fallback(text)
+            return
+        self._ready.emit(str(path), text)
 
-    def _play(self, path: str) -> None:
+    def _play(self, path: str, text: str) -> None:
+        self._text = text
         try:
             from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 
@@ -217,30 +268,53 @@ class Speaker(QObject):
                 self._audio.setVolume(1.0)
                 self._player.setAudioOutput(self._audio)
                 self._player.mediaStatusChanged.connect(self._status)
-                self._player.errorOccurred.connect(lambda *_: self.finished.emit())
+                self._player.errorOccurred.connect(self._player_error)
             self._player.setSource(QUrl.fromLocalFile(path))
             self.started.emit()
             self._player.play()
-        except Exception:
-            self.finished.emit()
+        except Exception as e:  # QtMultimedia missing/broken
+            log(f"QtMultimedia failed: {e!r}")
+            threading.Thread(target=self._play_fallback, args=(path, text), daemon=True).start()
 
     def _status(self, status) -> None:
         from PyQt6.QtMultimedia import QMediaPlayer
 
-        if status in (QMediaPlayer.MediaStatus.EndOfMedia, QMediaPlayer.MediaStatus.InvalidMedia):
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.finished.emit()
 
-    # -- offline fallback ---------------------------------------------------
+    def _player_error(self, _err, message: str = "") -> None:
+        log(f"QMediaPlayer error: {message}")
+        path = self._player.source().toLocalFile() if self._player is not None else ""
+        threading.Thread(target=self._play_fallback, args=(path, self._text), daemon=True).start()
+
+    def _play_fallback(self, path: str, text: str) -> None:
+        """Qt could not play the mp3: use Windows' own MCI player, else the offline voice."""
+        self.started.emit()
+        try:
+            if path and play_mp3_windows(path):
+                self.finished.emit()
+                return
+        except Exception as e:
+            log(f"MCI failed: {e!r}")
+        self._warn("mp3 play nahi ho paya (audio player problem)")
+        self._fallback(text)
+
+    # -- offline fallback ------------------------------------------------------
     def _fallback(self, text: str) -> None:
         self.started.emit()
         try:
             import pyttsx3
 
             engine = pyttsx3.init()
-            engine.setProperty("rate", 175)
+            engine.setProperty("rate", 170)
+            if DEVANAGARI.search(text):  # prefer an installed Hindi system voice
+                for v in engine.getProperty("voices"):
+                    if "hindi" in (v.name or "").lower() or "hi-in" in (v.id or "").lower():
+                        engine.setProperty("voice", v.id)
+                        break
             engine.say(text)
             engine.runAndWait()
-        except Exception:
-            pass  # no TTS engine at all: the speech bubble still shows the reply
+        except Exception as e:
+            log(f"pyttsx3 failed: {e!r}")  # no TTS engine at all: the bubble still shows the reply
         finally:
             self.finished.emit()

@@ -16,13 +16,19 @@ ASSETS = Path(__file__).resolve().parent.parent / "assets"
 OUT_W = 480  # output width in px (the character is drawn much smaller; this keeps it crisp)
 
 
+def has_avatar() -> bool:
+    return (ASSETS / "head.png").exists() and (ASSETS / "head.json").exists()
+
+
 def make_head(photo: str | Path, out_dir: Path = ASSETS) -> Path:
     import cv2
     import numpy as np
 
+    if not hasattr(cv2, "CascadeClassifier"):
+        raise ValueError("OpenCV ka naya version chahiye nahi, purana chahiye: pip install \"opencv-python-headless<4.11\"")
     img = cv2.imread(str(photo))
     if img is None:
-        raise SystemExit(f"Could not read image: {photo}")
+        raise ValueError(f"Could not read image: {photo}")
     h, w = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
@@ -32,9 +38,7 @@ def make_head(photo: str | Path, out_dir: Path = ASSETS) -> Path:
     if len(faces):
         fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
     else:
-        fw = fh = int(min(w, h) * 0.4)
-        fx, fy = (w - fw) // 2, (h - fh) // 3
-        print("No face detected -- using the center of the image.")
+        raise ValueError("Is photo mein chehra nahi mila. Saamne se, saaf roshni wali photo chuno.")
 
     # 2. crop: a bit of hair above, chin and some neck below, small margin on the sides
     x0, x1 = int(fx - 0.45 * fw), int(fx + 1.45 * fw)
